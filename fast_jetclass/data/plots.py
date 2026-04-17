@@ -28,14 +28,15 @@ def select_feature_labels(choice: str) -> list[str]:
         "$\\cos(\\theta)$",
         "$\\cos(\\theta^\\mathrm{rel})$",
     ]
-    andre_feature_labels = ["p_T", "\\eta^\\mathrm{rel}", "\\phi^\\mathrm{rel}"]
 
     switcher = {
-        "ptetaphi": lambda: operator.itemgetter(5, 8, 11)(all_feature_labels),
-        "allfeats": lambda: all_feature_labels,
+        "ptetaphi": operator.itemgetter(5, 8, 11),
+        "allfeats": lambda labels: labels,
     }
 
-    feature_labels = switcher.get(choice, lambda: None)()
+    feature_labels = switcher.get(
+        choice, operator.itemgetter(*map(int, choice.split(",")))
+    )(all_feature_labels)
     if feature_labels is None:
         raise TypeError("Feature labels name not valid!")
 
@@ -96,9 +97,14 @@ def normalised_data(
         plt.ylabel("Probability Density")
         plt.gca().set_yscale("log")
         plt.legend()
-        plt.savefig(
-            os.path.join(outdir, f"{feature_labels[feature]}_{train_or_val}_.pdf")
+        outfile = (
+            feature_labels[feature]
+            .replace("$", "")
+            .replace("\\", "")
+            .replace("mathrm", "")
+            + f"_{train_or_val}.pdf"
         )
+        plt.savefig(os.path.join(outdir, outfile))
         plt.close()
 
     print(tcols.OKGREEN + "Plots saved to: " + tcols.ENDC, outdir, "\U0001f4ca")

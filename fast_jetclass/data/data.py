@@ -9,7 +9,6 @@ import h5py
 import pickle
 import numpy as np
 import sklearn.model_selection
-import tensorflow as tf
 
 from fast_jetclass.data import standardization
 from fast_jetclass.data import plots
@@ -37,6 +36,12 @@ class HLS4MLData150(object):
         train: Whether to import the training data (True) or validation data (False)
             of this data set.
         seed: If provided, shuffles the *constituents* in the data set with given seed.
+        kfolds: If >0, the training data is split into k folds for cross-validation.
+        transform: The type of transformation to apply to the data. Specified by a string
+                   "function->indices" where function is a numpy method and indices is a
+                   comma separated list of indices. e.g. "log10->4".
+        std_kwargs: dict holding the keyword arguments for the standardisation methods.
+                    These can be "feature_range" or "percentiles".
     """
 
     def __init__(
@@ -48,6 +53,8 @@ class HLS4MLData150(object):
         train: bool,
         kfolds: 0,
         seed: int = None,
+        transform: str = None,
+        std_kwargs: dict = None,
     ):
         super().__init__()
         self.root = Path(root)
@@ -60,6 +67,8 @@ class HLS4MLData150(object):
         self.min_pt = 2
         self.kfolds = kfolds
         self.norm_params = None
+        self.transform = transform
+        self.std_kwargs = std_kwargs if std_kwargs is not None else {}
 
         self.train_url = (
             "https://zenodo.org/records/3602260/files/hls4ml_LHCjet_150p_train.tar.gz"
@@ -139,6 +148,7 @@ class HLS4MLData150(object):
         if not raw_dir.is_dir():
             os.makedirs(raw_dir)
 
+        print(tcols.OKGREEN + "Downloading raw data..." + tcols.ENDC)
         if self.train:
             data_file_path = wget.download(self.train_url, out=str(raw_dir))
         else:
@@ -153,16 +163,21 @@ class HLS4MLData150(object):
     def _import_raw_data(self) -> tuple[np.ndarray, np.ndarray]:
         """Imports the raw data files into a numpy array."""
         dfiles = list(file for file in self.data_file_dir.iterdir() if file.is_file())
-        data = h5py.File(dfiles[0])
-        self.x_raw = data["jetConstituentList"]
-        self.y_raw = data["jets"][:, -6:-1]
+        self.x_raw = []
+        self.y_raw = []
 
-        for file_path in dfiles[1:]:
-            data = h5py.File(file_path)
-            add_x_data = data["jetConstituentList"]
-            add_y_data = data["jets"][:, -6:-1]
-            self.x_raw = np.concatenate((self.x_raw, add_x_data), axis=0)
-            self.y_raw = np.concatenate((self.y_raw, add_y_data), axis=0)
+        print("Importing raw data...", end="\r")
+        for i, file_path in enumerate(dfiles):
+            print(f"Importing raw data... {i + 1}/{len(dfiles)}", end="\r")
+            with h5py.File(file_path, "r") as data:
+                add_x_data = data["jetConstituentList"]
+                add_y_data = data["jets"][:, -6:-1]
+                self.x_raw.append(np.asarray(add_x_data))
+                self.y_raw.append(np.asarray(add_y_data))
+
+        self.x_raw = np.concatenate(self.x_raw, axis=0)
+        self.y_raw = np.concatenate(self.y_raw, axis=0)
+        print(tcols.OKGREEN + f"Importing done! \U00002714" + tcols.ENDC)
 
     def _preproc_raw_data(self):
         """Applies preprocessing to the raw data.
@@ -175,10 +190,11 @@ class HLS4MLData150(object):
         ordered in descending order of tranverse momentum value. The first n
         constituents are taken for each jet, where n is a number between 1 and 150.
         """
-        self.x_preprocessed = np.copy(self.x_raw)
+        self.x_preprocessed = self.x_raw
         del self.x_raw
-        self.y_preprocessed = np.copy(self.y_raw)
+        self.y_preprocessed = self.y_raw
         del self.y_raw
+        print("Preprocessing...")
         self._cut_transverse_momentum()
         self._restrict_nb_constituents()
 
@@ -187,6 +203,7 @@ class HLS4MLData150(object):
             os.makedirs(preproc_dir)
         np.save(preproc_dir / f"x_{self.preproc_output_name}", self.x_preprocessed)
         np.save(preproc_dir / f"y_{self.preproc_output_name}", self.y_preprocessed)
+        print(tcols.OKGREEN + f"Preprocessing done! \U00002714" + tcols.ENDC)
 
     def _process_data(self):
         """Processes the already processed data.
@@ -195,34 +212,36 @@ class HLS4MLData150(object):
         Furthermore, each feature is normalized, using a certain normalization scheme.
         For example, minmax normalization.
         """
-        self.x = np.copy(self.x_preprocessed)
+        self.x = self.x_preprocessed
         del self.x_preprocessed
-        self.y = np.copy(self.y_preprocessed)
+        self.y = self.y_preprocessed
         del self.y_preprocessed
 
-        proc_folder = self.root / "processed"
-        self._get_features()
+        print("Processing...")
+        if self.transform is not None:
+            transform, indexes = self.transform.split("->")
+            indexes = list(map(int, indexes.split(",")))
+            transform = getattr(np, transform)
+            mask = (
+                self.x[..., indexes] > 0
+            )  # seems a hack but actually zeros are the padded constituents
+
+            self.x[..., indexes] = np.where(
+                mask, transform(self.x[..., indexes] + 1e-15), self.x[..., indexes]
+            )
         self.norm_params = self._get_normalisation_params()
         self._save_norm_parameters()
-
         self.x = standardization.apply_standardisation(
             self.norm, self.x, self.norm_params
         )
-        if self.seed and self.train:
+
+        self._get_features()
+
+        if self.seed:
             self.shuffle_constituents(self.seed)
+
+        print(tcols.OKGREEN + f"Processing done! \U00002714" + tcols.ENDC)
         self._plot_data()
-
-        if not proc_folder.is_dir():
-            os.makedirs(proc_folder)
-        proc_folder = self.root / "processed"
-        np.save(proc_folder / f"x_{self.proc_output_name}", self.x)
-        np.save(proc_folder / f"y_{self.proc_output_name}", self.y)
-
-        # Free up memory after finishing the preprocessing.
-        del self.x
-        del self.y
-        self.x = np.load(proc_folder / f"x_{self.proc_output_name}")
-        self.y = np.load(proc_folder / f"y_{self.proc_output_name}")
 
     def _get_normalisation_params(self) -> list[float]:
         """Computes the normalisation parameters on the training data.
@@ -233,59 +252,84 @@ class HLS4MLData150(object):
         passing it through the machine learning algorithm.
         """
         proc_folder = self.root / "processed"
+        norm_to_arg = {
+            "minmax": self.std_kwargs.get("feature_range", ""),
+            "robust": self.std_kwargs.get("percentiles", ""),
+        }
         if not self.train:
             try:
-                params = f"normparams_{self.norm}_{self.nconst}const_{self.feats}.pkl"
+                params = f"normparams_{self.norm}{norm_to_arg.get(self.norm, '')}_{self.nconst}const_transform{self.transform}.pkl"
                 with open(proc_folder / params, "rb") as file:
                     norm_params = pickle.load(file)
                     return norm_params
             except OSError as e:
+                print(e)
                 print("\nProcessed training data not found when normalising val data.")
                 print("The moments of the training data are needed.")
                 print("Processing training data with same hyperparameters first!")
                 x_data_train = HLS4MLData150(
-                    self.root, self.nconst, self.feats, self.norm, True, self.kfolds
+                    self.root,
+                    self.nconst,
+                    self.feats,
+                    self.norm,
+                    True,
+                    self.kfolds,
+                    self.seed,
+                    self.transform,
+                    self.std_kwargs,
                 )
                 return x_data_train.norm_params
 
-        return standardization.fit_standardisation(self.norm, self.x)
+        return standardization.fit_standardisation(self.norm, self.x, self.std_kwargs)
 
     def _get_processed_data(self):
         """Imports the processed data if it exists. If not, generates it."""
-        if not self._check_processed_data_exists():
-            if not self._check_preprocessed_data_exists():
-                self._import_raw_data()
-                self._preproc_raw_data()
+        if not self._check_preprocessed_data_exists():
+            self._import_raw_data()
+            self._preproc_raw_data()
 
-            self._process_data()
+        self._process_data()
 
     def _save_norm_parameters(self):
         """Save the normalisation parameters to a file for importing."""
         proc_folder = self.root / "processed"
+        norm_to_arg = {
+            "minmax": self.std_kwargs.get("feature_range", ""),
+            "robust": self.std_kwargs.get("percentiles", ""),
+        }
         if not proc_folder.is_dir():
             os.makedirs(proc_folder)
-        params_filename = f"normparams_{self.norm}_{self.nconst}const_{self.feats}.pkl"
-        with open(proc_folder / params_filename, "wb") as file:
-            pickle.dump(self.norm_params, file)
+        params_filename = f"normparams_{self.norm}{norm_to_arg.get(self.norm, '')}_{self.nconst}const_transform{self.transform}.pkl"
+        # Don't overwrite existing norm parameters (avoid race conditions).
+        if not os.path.exists(proc_folder / params_filename):
+            with open(proc_folder / params_filename, "wb") as file:
+                pickle.dump(self.norm_params, file)
 
     def _plot_data(self):
         """Plots the normalised data."""
-        print("Plotting data...")
-        plots_folder = self.root / f"plots_{self.norm}_{self.nconst}const_{self.feats}"
+        plots_folder = (
+            self.root / f"plots_{self.norm}_{self.nconst}const_{self.transform}"
+        )
         if not plots_folder.is_dir():
             os.makedirs(plots_folder)
+        else:
+            if os.path.exists(
+                os.path.join(plots_folder, f"constituents_plot_{self.type}.pdf")
+            ):
+                return
 
+        print("Plotting data...")
         plots.constituent_number(plots_folder, self.x, self.type)
         plots.normalised_data(plots_folder, self.x, self.y, self.type, self.feats)
 
     def _get_features(self) -> np.ndarray:
         """Choose what feature selection to employ on the data. Return shape."""
         switcher = {
-            "ptetaphi": lambda: self._select_features_ptetaphi(self.x),
-            "allfeats": lambda: self._select_features_all(self.x),
+            "ptetaphi": self._select_features_ptetaphi,
+            "allfeats": self._select_features_all,
         }
 
-        self.x = switcher.get(self.feats, lambda: None)()
+        self.x = switcher.get(self.feats, self._select_features_index)(self.x)
         if self.x is None:
             raise TypeError("Feature selection name not valid!")
 
@@ -301,6 +345,10 @@ class HLS4MLData150(object):
         deltaR, cos(theta), cos(thetarel), pdgid)
         """
         return data[:, :, :]
+
+    def _select_features_index(self, data: np.ndarray) -> np.ndarray:
+        """Selects features from the numpy jet array based on a list of indices."""
+        return data[:, :, list(map(int, self.feats.split(",")))]
 
     def _cut_transverse_momentum(self):
         """Remove constituents that are below a certain transverse momentum from jets.
@@ -349,7 +397,7 @@ class HLS4MLData150(object):
             shuffling = np.random.RandomState(seed=seed).permutation(self.x.shape[1])
             self.x[jet_idx, :] = self.x[jet_idx, shuffling]
 
-        print(tcols.OKGREEN + f"Shuffling done! \U0001F0CF" + tcols.ENDC)
+        print(tcols.OKGREEN + f"Shuffling done! \U0001f0cf" + tcols.ENDC)
 
     def _kfold(self):
         """Creates a kfolded view of the data."""

@@ -39,7 +39,7 @@ def apply_standardisation(choice: str, x_data: np.ndarray, norm_params: dict):
     return x_data
 
 
-def fit_standardisation(choice: str, x_data: np.ndarray):
+def fit_standardisation(choice: str, x_data: np.ndarray, std_kwargs: dict):
     """Choose the type of normalisation to fit to the data.
 
     Args:
@@ -55,13 +55,13 @@ def fit_standardisation(choice: str, x_data: np.ndarray):
 
     print(tcols.OKGREEN + f"Fitting {choice} normalisation..." + tcols.ENDC)
     switcher = {
-        "minmax": lambda: minmax_fit(x_data),
-        "robust": lambda: robust_fit(x_data),
-        "robust_fast": lambda: robust_fit(x_data),
-        "standard": lambda: standard_fit(x_data),
+        "minmax": minmax_fit,
+        "robust": robust_fit,
+        "robust_fast": robust_fit,
+        "standard": standard_fit,
     }
 
-    norm_params = switcher.get(choice, lambda: None)()
+    norm_params = switcher.get(choice, lambda: None)(x_data, **std_kwargs)
 
     if norm_params is None:
         raise NameError(
@@ -69,26 +69,28 @@ def fit_standardisation(choice: str, x_data: np.ndarray):
             f"the following list: {list(switcher.keys())}"
         )
 
-    print("The normalisation parameters are: ")
-    print("\n".join(f"{param}: {value}" for param, value in norm_params.items()))
-    print(f"{'':-<25}\n")
-
     return norm_params
 
 
-def minmax_fit(x: np.ndarray) -> np.ndarray:
+def minmax_fit(
+    x: np.ndarray, feature_range: tuple = (0.0, 1.0), **kwargs
+) -> np.ndarray:
     """Finds the minimum and maximum of each feature in the given data."""
     min_feats = x.min(axis=0).min(axis=0)
     max_feats = x.max(axis=0).max(axis=0)
 
-    return {"min_feats": min_feats, "max_feats": max_feats}
+    return {
+        "min_feats": min_feats,
+        "max_feats": max_feats,
+        "feature_range": feature_range,
+    }
 
 
 def minmax_apply(
     x: np.ndarray,
     min_feats: np.ndarray,
     max_feats: np.ndarray,
-    feature_range: tuple = (0, 1),
+    feature_range: tuple = (0.0, 1.0),
 ) -> np.ndarray:
     """Applies minmax normalisation to the data.
 
@@ -100,7 +102,7 @@ def minmax_apply(
     return x_norm
 
 
-def robust_fit(x: np.ndarray, percentiles: list = [95, 5]) -> np.ndarray:
+def robust_fit(x: np.ndarray, percentiles: list = [95, 5], **kwargs) -> np.ndarray:
     """Fits data to find parameters for robust normalisation.
 
     Args:
@@ -150,7 +152,9 @@ def standard_fit(x: np.ndarray) -> np.ndarray:
     return {"x_mean": x_mean, "x_std": x_std}
 
 
-def standard_apply(x: np.ndarray, x_mean: np.ndarray, x_std: np.ndarray) -> np.ndarray:
+def standard_apply(
+    x: np.ndarray, x_mean: np.ndarray, x_std: np.ndarray, **kwargs
+) -> np.ndarray:
     """Applies standard normalisation to the data.
 
     The mean of each feature is subtracted from every sample belonging to the
