@@ -10,9 +10,9 @@ import pickle
 import numpy as np
 import sklearn.model_selection
 
-from fast_jetclass.data import standardization
-from fast_jetclass.data import plots
-from fast_jetclass.util.terminal_colors import tcols
+from . import standardization
+from . import plots
+from .terminal_colors import tcols
 
 
 class HLS4MLData150(object):
